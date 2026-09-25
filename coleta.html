@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ANTAQ | Coleta de Campo Georreferenciada</title>
+  <!-- Biblioteca Leaflet e Leitor QR Code -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 12px; background: #f1f5f9; color: #0f172a; }
+    .card { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    h2 { font-size: 15px; margin-top: 0; color: #0a2540; border-bottom: 2px solid #0284c7; padding-bottom: 6px; }
+    label { display: block; font-size: 11px; font-weight: 700; margin-top: 10px; color: #475569; }
+    input, select, textarea { width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; font-size: 13px; }
+    .btn { display: block; width: 100%; padding: 10px; margin-top: 10px; border: none; border-radius: 6px; font-weight: 700; font-size: 13px; cursor: pointer; text-align: center; }
+    .btn-gps { background: #0284c7; color: #fff; }
+    .btn-qr { background: #4f46e5; color: #fff; }
+    .btn-salvar { background: #10b981; color: #fff; }
+    .btn-exportar { background: #0a2540; color: #fff; margin-top: 15px; }
+    #mapa-preview { height: 160px; border-radius: 6px; margin-top: 8px; }
+    #leitor-qr { display: none; width: 100%; margin-top: 8px; border-radius: 6px; overflow: hidden; }
+    .badge-status { font-size: 11px; padding: 4px 8px; border-radius: 4px; background: #e2e8f0; display: inline-block; margin-top: 4px; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h2>📋 Formulário de Vistoria Técnica</h2>
+    
+    <button type="button" class="btn btn-qr" onclick="iniciarLeitorQR()">📷 Ler QR Code do Ativo</button>
+    <div id="leitor-qr"></div>
+
+    <label>Identificador do Ativo:</label>
+    <input type="text" id="campo-id" placeholder="Ex: TUP_33001 ou IP4_13002" />
+
+    <label>Nome da Instalação / Local:</label>
+    <input type="text" id="campo-nome" placeholder="Nome do terminal ou atracadouro" />
+
+    <label>Regime de Outorga:</label>
+    <select id="campo-outorga">
+      <option value="TUP">Terminal de Uso Privado (TUP)</option>
+      <option value="ORGANIZADO">Porto Organizado (Lei 12.815)</option>
+      <option value="PUBLICO">Porto Público</option>
+      <option value="IP4">Instalação de Pequeno Porte (IP4)</option>
+      <option value="ETC">Estação de Transbordo (ETC)</option>
+      <option value="OUTROS">Outros Registros / Apoio</option>
+    </select>
+
+    <label>Conformidade Operacional:</label>
+    <select id="campo-conformidade">
+      <option value="Conforme">🟢 Conforme (Operação Regular)</option>
+      <option value="Atencao">🟡 Requer Atenção (Inconformidade Leve)</option>
+      <option value="Critico">🔴 Crítico (Interdição / Risco Grave)</option>
+    </select>
+
+    <label>Coordenadas Espaciais:</label>
+    <button type="button" class="btn btn-gps" onclick="capturarCoordenada()">📍 Capturar GPS do Aparelho</button>
+    <div class="badge-status" id="gps-status">Aguardando captura...</div>
+    <input type="hidden" id="campo-lat" />
+    <input type="hidden" id="campo-lng" />
+    <div id="mapa-preview"></div>
+
+    <label>Identificação do Vistoriador (Será Anonimizada em Gabinete):</label>
+    <input type="text" id="campo-responsavel" placeholder="Nome ou matrícula interna" />
+
+    <label>Observações Técnicas:</label>
+    <textarea id="campo-obs" rows="3" placeholder="Relato sucinto da vistoria..."></textarea>
+
+    <button type="button" class="btn btn-salvar" onclick="salvarRegistroLocal()">💾 Salvar Vistoria no Aparelho</button>
+  </div>
+
+  <div class="card">
+    <h2>📦 Armazenamento Local (Offline)</h2>
+    <div id="contador-registros">Coletas salvas: 0</div>
+    <button type="button" class="btn btn-exportar" onclick="exportarColetas()">📥 Baixar Arquivo para Gabinete (.json)</button>
+  </div>
+
+  <script>
+    // Inicialização do mini-mapa Leaflet para conferência de campo
+    const map = L.map('mapa-preview').setView([-15.78, -47.92], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    let marker = null;
+
+    // Leitura de parâmetros de URL (caso o QR Code traga dados pré-definidos)
+    window.onload = function() {
+      const p = new URLSearchParams(window.location.search);
+      if (p.get('id')) document.getElementById('campo-id').value = p.get('id');
+      if (p.get('nome')) document.getElementById('campo-nome').value = p.get('nome');
+      if (p.get('tipo')) document.getElementById('campo-outorga').value = p.get('tipo');
+      atualizarContador();
+    };
+
+    // Captura de GPS via Geolocation API
+    function capturarCoordenada() {
+      const statusEl = document.getElementById('gps-status');
+      if (!navigator.geolocation) {
+        statusEl.innerText = "GPS não suportado neste aparelho.";
+        return;
+      }
+      statusEl.innerText = "Obtendo sinal dos satélites...";
+      navigator.geolocation.getCurrentPosition(
+        pos => {
+          const lat = pos.coords.latitude;
+          const lng = pos.coords.longitude;
+          const acc = Math.round(pos.coords.accuracy);
+          document.getElementById('campo-lat').value = lat;
+          document.getElementById('campo-lng').value = lng;
+          statusEl.innerText = `✓ Fixado: ${lat.toFixed(5)}, ${lng.toFixed(5)} (Precisão: ±${acc}m)`;
+          
+          if (marker) map.removeLayer(marker);
+          marker = L.marker([lat, lng]).addTo(map);
+          map.setView([lat, lng], 15);
+        },
+        err => { statusEl.innerText = `Erro no GPS: ${err.message}`; },
+        { enableHighAccuracy: true, timeout: 12000 }
+      );
+    }
+
+    // Leitor de QR Code usando câmera nativa
+    function iniciarLeitorQR() {
+      const el = document.getElementById('leitor-qr');
+      el.style.display = 'block';
+      const scanner = new Html5Qrcode("leitor-qr");
+      scanner.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 220, height: 220 } },
+        (decodedText) => {
+          scanner.stop();
+          el.style.display = 'none';
+          // Se o QR Code for uma URL, processa os parâmetros
+          if (decodedText.includes('?')) {
+            const url = new URL(decodedText);
+            if (url.searchParams.get('id')) document.getElementById('campo-id').value = url.searchParams.get('id');
+            if (url.searchParams.get('nome')) document.getElementById('campo-nome').value = url.searchParams.get('nome');
+          } else {
+            document.getElementById('campo-id').value = decodedText;
+          }
+          alert(`Código lido: ${decodedText}`);
+        },
+        () => {}
+      );
+    }
+
+    // Salvar registro no LocalStorage do celular
+    function salvarRegistroLocal() {
+      const lat = parseFloat(document.getElementById('campo-lat').value);
+      const lng = parseFloat(document.getElementById('campo-lng').value);
+      if (isNaN(lat) || isNaN(lng)) {
+        alert("Capture o GPS do aparelho antes de salvar.");
+        return;
+      }
+
+      const item = {
+        id_ativo: document.getElementById('campo-id').value.trim() || 'SEM_CODIGO',
+        nome_ativo: document.getElementById('campo-nome').value.trim() || 'Não especificado',
+        tipo_outorga: document.getElementById('campo-outorga').value,
+        conformidade: document.getElementById('campo-conformidade').value,
+        responsavel_interno: document.getElementById('campo-responsavel').value.trim(), // Será removido no QGIS
+        observacoes: document.getElementById('campo-obs').value.trim(),
+        data_coleta: new Date().toISOString().split('T')[0],
+        hora_coleta: new Date().toLocaleTimeString('pt-BR'),
+        lat: lat,
+        lng: lng
+      };
+
+      const lista = JSON.parse(localStorage.getItem('antaq_vistorias_campo') || '[]');
+      lista.push(item);
+      localStorage.setItem('antaq_vistorias_campo', JSON.stringify(lista));
+
+      alert("Vistoria gravada no aparelho!");
+      // Limpa formulário para o próximo ponto
+      document.getElementById('campo-id').value = '';
+      document.getElementById('campo-nome').value = '';
+      document.getElementById('campo-obs').value = '';
+      atualizarContador();
+    }
+
+    function atualizarContador() {
+      const lista = JSON.parse(localStorage.getItem('antaq_vistorias_campo') || '[]');
+      document.getElementById('contador-registros').innerText = `Coletas armazenadas no celular: ${lista.length}`;
+    }
+
+    // Exporta o arquivo bruto para ser processado no QGIS
+    function exportarColetas() {
+      const lista = JSON.parse(localStorage.getItem('antaq_vistorias_campo') || '[]');
+      if (lista.length === 0) {
+        alert("Nenhum registro para exportar.");
+        return;
+      }
+      const blob = new Blob([JSON.stringify(lista, null, 2)], { type: "application/json" });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `coletas_campo_bruto_${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+    }
+  </script>
+</body>
+</html>
